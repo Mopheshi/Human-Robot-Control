@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Calibrated Kinematic Hierarchy</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; color: white; font-family: sans-serif; }
+        #status { position: absolute; top: 20px; left: 20px; font-size: 18px; }
+        #instructions { position: absolute; bottom: 20px; left: 20px; font-size: 14px; color: #888; }
+        #calibrateBtn {
+            position: absolute; top: 60px; left: 20px; padding: 10px 20px;
+            font-size: 16px; background-color: #007bff; color: white; border: none; cursor: pointer;
+        }
+        #calibrateBtn:hover { background-color: #0056b3; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div id="status">Awaiting connection to Bridge...</div>
+    <button id="calibrateBtn">Calibrate (Zero Offsets)</button>
+    <div id="instructions">1. Lay all sensors perfectly flat and straight.<br>2. Press Calibrate.<br>3. Move sensors.</div>
+    <script>
+        // Setup the 3D Scene
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(5, 5, 5);
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0x404040));
+
+        camera.position.z = 15;
+        camera.position.y = -5;
+
+        // Build the Kinematic Hierarchy
+        const boneLength = 2.5;
+        const joints = [];
+        let currentParent = scene;
+
+        for (let i = 1; i <= 5; i++) {
+            const jointGroup = new THREE.Group();
+            if (i > 1) { jointGroup.position.y = -boneLength; }
+            currentParent.add(jointGroup);
+
+            const geometry = new THREE.BoxGeometry(0.8, boneLength, 0.5);
+            const colour = new THREE.Color().setHSL((i-1)/5, 1, 0.5);
+            const material = new THREE.MeshPhongMaterial({ color: colour });
+            const boneMesh = new THREE.Mesh(geometry, material);
+
+            boneMesh.position.y = -boneLength / 2;
+            jointGroup.add(boneMesh);
+
+            joints.push(jointGroup);
+            currentParent = jointGroup;
+        }
+
+        // Data Structures for Calibration Math
+        const rawGlobalQuats = {};
+        const offsetQuats = {};
+        for (let i = 1; i <= 5; i++) {
+            rawGlobalQuats[`Joint_${i}`] = new THREE.Quaternion();
+            offsetQuats[`Joint_${i}`] = new THREE.Quaternion(); // Defaults to Identity (no offset)
+        }
+
+        // Calibration Function
+        document.getElementById('calibrateBtn').addEventListener('click', () => {
+            for (let i = 1; i <= 5; i++) {
+                const jointName = `Joint_${i}`;
+                // Capture current raw rotation and store its inverse as the offset
+                offsetQuats[jointName].copy(rawGlobalQuats[jointName]).invert();
+            }
+            console.log("Sensors Calibrated to T-Pose.");
+        });
+
+        // WebSocket Connection
+        const ws = new WebSocket('ws://127.0.0.1:8080');
+        ws.onopen = () => { document.getElementById('status').innerText = "Connected. Raw Data Streaming."; };
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (rawGlobalQuats[data.id]) {
+                // WitMotion: q1=x, q2=y, q3=z, q0=w
+                rawGlobalQuats[data.id].set(data.q1, data.q2, data.q3, data.q0);
+            }
+        };
+
+        // Math and Render Loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            for (let i = 0; i < 5; i++) {
+                const jointName = `Joint_${i + 1}`;
+
+                // STEP A: Apply the calibration offset to get the corrected global rotation
+                // q_calibrated = q_offset * q_raw
+                const qCalibratedCurrent = new THREE.Quaternion()
+                    .copy(offsetQuats[jointName])
+                    .multiply(rawGlobalQuats[jointName]);
+
+                // STEP B: Apply Forward Kinematics (Parent/Child extraction)
+                if (i === 0) {
+                    joints[i].quaternion.copy(qCalibratedCurrent);
+                } else {
+                    const parentName = `Joint_${i}`;
+                    const qCalibratedParent = new THREE.Quaternion()
+                        .copy(offsetQuats[parentName])
+                        .multiply(rawGlobalQuats[parentName]);
+
+                    // q_local = inverse(q_parent) * q_current
+                    const qParentInverse = qCalibratedParent.invert();
+                    const qLocal = qParentInverse.multiply(qCalibratedCurrent);
+
+                    joints[i].quaternion.copy(qLocal);
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
