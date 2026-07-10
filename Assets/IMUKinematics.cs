@@ -5,7 +5,7 @@ using System.Text;
 using System.Threading;
 using UnityEngine;
 
-// This class perfectly matches your Python JSON payload
+// This class matches Python JSON payload
 [Serializable]
 public class IMUData
 {
